@@ -1,21 +1,12 @@
-Shader "Holistic/RaymarchCloudsVolume"
+Shader "Holistic/CloudsCamera"
 {
     Properties
     {
-        _Scale ("Scale", Range(0.1, 10.0)) = 2.0 
-        _StepScale ("Step Scale", Range(0.1, 100.0)) = 1
-        _Steps ("Steps", Range(0.1, 200.0)) = 60 //Ray marchingするステップ数
-        _MinHeight ("Min Height", Range(0.0, 5.0)) = 0 //box内の高さの設定
-        _MaxHeight ("Max Height", Range(6.0, 10.0)) = 10
-        _FadeDist ("Fade Distance", Range(0.0, 10.0)) = 0.5
-        _SunDir ("Sun Direction", Vector) = (1, 0, 0, 0)
+        _MainTex("", 2D) = "white" {}
     }
     SubShader
     {
-        Tags { "Queue" = "Transparent" }
-        Blend SrcAlpha OneMinusSrcAlpha
-        Cull Off Lighting Off ZWrite Off
-        ZTest Always
+        ZTest Always Cull Off ZWrite Off
 
         Pass
         {
@@ -24,18 +15,11 @@ Shader "Holistic/RaymarchCloudsVolume"
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            struct appdata
-            {
-                float4 vertex : POSITION;
-                float2 uv : TEXCOORD0;
-            };
-
             struct v2f
             {
                 float4 pos : SV_POSITION;
-                float3 view : TEXCOORD0;
-                float4 projPos : TEXCOORD1;
-                float3 wpos : TEXCOORD2;
+                float2 uv : TEXCOORD0;
+                float3 view : TEXCOORD1;
             };
 
             float _MinHeight;
@@ -47,49 +31,14 @@ Shader "Holistic/RaymarchCloudsVolume"
             float4 _SunDir;
             sampler2D _CameraDepthTexture;
 
-            float random(float3 value, float3 dotDir)
-            {
-                float3 smallValue = sin(value);
-                float random = dot(smallValue, dotDir);
-                random = frac(sin(random) * 123574.43212);
-                return random;
-            }
+            sampler2D _MainTex;
+            float4 _MainTex_TexelSize;
+            sampler2D _ValueNoise;
 
-            float3 random3d(float3 value)
-            {
-                return float3 (random(value, float3(12.898, 68.54, 37.7298)),
-                               random(value, float3(39.898, 26.54, 85.7238)),
-                               random(value, float3(76.898, 12.54, 8.6788)));
-            }
-
-            float noise3d(float3 value)
-            {
-                value *= _Scale;
-                value.x += _Time.x * 5; //x軸方向に動かす
-                float3 interp = frac(value);
-                interp = smoothstep(0.0, 1.0, interp);
-
-                float3 ZValues[2];
-                for(int z = 0; z <= 1; z++)
-                {
-                    float3 YValues[2];
-                    for(int y = 0; y <= 1; y++)
-                    {
-                        float3 XValues[2];
-                        for(int x = 0; x <= 1; x++)
-                        {
-                            float3 cell = floor(value) + float3(x, y, z);
-                            XValues[x] = random3d(cell);
-                        }
-                        YValues[y] = lerp(XValues[0], XValues[1], interp.x);
-                    }
-                    ZValues[z] = lerp(YValues[0], YValues[1], interp.y);
-                }
-
-                float noise = -1.0 + 2.0 * lerp(ZValues[0], ZValues[1], interp.z);
-                return noise;
-            }
-
+            float4x4 _FrustumCornersWS;
+            float4 _CameraPosWS;
+            float4x4 _CameraInvViewMatrix;
+            
             fixed4 integrate(fixed4 sum, float diffuse, float density, fixed4 bgcol, float t)
             {
                 fixed3 lighting = fixed3(0.6, 0.6, 0.6) * 1.3 + 0.5 * fixed3(0.7, 0.5, 0.3) * diffuse;
@@ -124,15 +73,29 @@ Shader "Holistic/RaymarchCloudsVolume"
                 } \
             }
 
+            
+
             #define NOISEPROC(N, P)  1.75 * N * saturate((_MaxHeight - P.y)/_FadeDist)
+
+            float noiseFromImage(float3 x)
+            {
+                x *= _Scale;
+                float3 p = floor(x);
+                float3 f = frac(x);
+                f = smoothstep(0, 1, f);
+
+                float2 uv = (p.xy + float2(37.0, -17.0) * p.z) + f.xy;
+                float2 rg = tex2Dlod(_ValueNoise, float4(uv/256, 0, 0)).rg;
+                return -1.0 + 2.0 * lerp(rg.g, rg.r, f.z);
+            }
             
             float map1(float3 q)
             {
                 float3 p = q;//ポイントのp
                 float f;//ノイズの累積(frequency)
-                f = 0.5 * noise3d(q);
+                f = 0.5 * noiseFromImage(q);
                 q *= 2;
-                f += 0.25 * noise3d(q);
+                f += 0.25 * noiseFromImage(q);
                 return NOISEPROC(f, p);
             }
 
@@ -140,11 +103,11 @@ Shader "Holistic/RaymarchCloudsVolume"
             {
                 float3 p = q;//ポイントのp
                 float f;//ノイズの累積(frequency)
-                f = 0.5 * noise3d(q);
+                f = 0.5 * noiseFromImage(q);
                 q *= 2;
-                f += 0.25 * noise3d(q);
+                f += 0.25 * noiseFromImage(q);
                 q *= 3;
-                f += 0.125 * noise3d(q);
+                f += 0.125 * noiseFromImage(q);
                 return NOISEPROC(f, p);
             }
 
@@ -152,13 +115,13 @@ Shader "Holistic/RaymarchCloudsVolume"
             {
                 float3 p = q;//ポイントのp
                 float f;//ノイズの累積(frequency)
-                f = 0.5 * noise3d(q);
+                f = 0.5 * noiseFromImage(q);
                 q *= 2;
-                f += 0.25 * noise3d(q);
+                f += 0.25 * noiseFromImage(q);
                 q *= 3;
-                f += 0.125 * noise3d(q);
+                f += 0.125 * noiseFromImage(q);
                 q *= 4;
-                f += 0.0625 * noise3d(q);
+                f += 0.0625 * noiseFromImage(q);
                 return NOISEPROC(f, p);
             }
 
@@ -166,15 +129,15 @@ Shader "Holistic/RaymarchCloudsVolume"
             {
                 float3 p = q;//ポイントのp
                 float f;//ノイズの累積(frequency)
-                f = 0.5 * noise3d(q);
+                f = 0.5 * noiseFromImage(q);
                 q *= 2;
-                f += 0.25 * noise3d(q);
+                f += 0.25 * noiseFromImage(q);
                 q *= 3;
-                f += 0.125 * noise3d(q);
+                f += 0.125 * noiseFromImage(q);
                 q *= 4;
-                f += 0.0625 * noise3d(q);
+                f += 0.0625 * noiseFromImage(q);
                 q *= 5;
-                f += 0.03125 * noise3d(q);
+                f += 0.03125 * noiseFromImage(q);
                 return NOISEPROC(f, p);
             }
 
@@ -182,17 +145,17 @@ Shader "Holistic/RaymarchCloudsVolume"
             {
                 float3 p = q;//ポイントのp
                 float f;//ノイズの累積(frequency)
-                f = 0.5 * noise3d(q);
+                f = 0.5 * noiseFromImage(q);
                 q *= 2;
-                f += 0.25 * noise3d(q);
+                f += 0.25 * noiseFromImage(q);
                 q *= 3;
-                f += 0.125 * noise3d(q);
+                f += 0.125 * noiseFromImage(q);
                 q *= 4;
-                f += 0.0625 * noise3d(q);
+                f += 0.0625 * noiseFromImage(q);
                 q *= 5;
-                f += 0.03125 * noise3d(q);
+                f += 0.03125 * noiseFromImage(q);
                 q *= 6;
-                f += 0.015625 * noise3d(q);
+                f += 0.015625 * noiseFromImage(q);
                 return NOISEPROC(f, p);
             }
             
@@ -210,24 +173,41 @@ Shader "Holistic/RaymarchCloudsVolume"
                 return clamp(color, 0.0, 1.0);
             }
 
-            v2f vert (appdata v)
+            v2f vert (appdata_img v)
             {
                 v2f o;
-                o.wpos = mul(unity_ObjectToWorld, v.vertex).xyz;
+                half index = v.vertex.z;
+                v.vertex.z = 0.1;
                 o.pos = UnityObjectToClipPos(v.vertex);
-                o.view = o.wpos - _WorldSpaceCameraPos;
-                o.projPos = ComputeScreenPos(o.pos);
+                o.uv = v.texcoord.xy;
+
+                #if UNITY_UV_START_AT_TOP
+                    if(_MainTexSize.y < 0)
+                        o.uv.y = 1 - o.uv.y;
+                #endif
+
+                o.view = _FrustumCornersWS[(int)index];
+                o.view /= abs(o.view.z);
+                o.view = mul(_CameraInvViewMatrix, o.view);
                 return o;
             }
 
             fixed4 frag (v2f i) : SV_Target
             {
-                float depth = 1;
-                depth *= length(i.view);
-                fixed4 color = fixed4(1, 1, 1, 0);
-                fixed4 clouds = raymarch(_WorldSpaceCameraPos, normalize(i.view) * _StepScale, color, depth);
-                fixed3 mixedColor = color * (1.0 - clouds.a) + clouds.rgb;
-                return fixed4(mixedColor, clouds.a);
+                float3 start = _CameraPosWS;
+                float2 duv = i.uv;
+
+                #if UNITY_UV_START_AT_TOP
+                    if(_MainTexSize.y < 0)
+                        duv.y = 1 - duv.y;
+                #endif
+
+                float depth = LinearEyeDepth(tex2D(_CameraDepthTexture, duv).r);
+                depth *= length(normalize(i.view));
+
+                fixed4 col = tex2D(_MainTex, i.uv);
+                fixed4 sum = raymarch(start, normalize(i.view), col, depth);
+                return fixed4(col * (1.0 - sum.a) + sum.rgb, 1.0);
             }
             ENDCG
         }
